@@ -1,0 +1,260 @@
+module Tests where
+
+import Daml.Script
+
+import DA.Foldable
+import qualified DA.NonEmpty as NE
+
+import Customer
+import Sales
+import Tests.Utils
+
+setup : Script (LedgerParties, Users, Vendors)
+setup = do
+  parties@LedgerParties{..} <- createParties
+  users <- createUsers parties
+
+  gary <- createVendorAccountAndAuthorize issuer_service vendor_gary issuer_service_customers "Gary's Bakery" garyBakeryPointsFactor
+  rue <- createVendorAccountAndAuthorize issuer_service vendor_rue issuer_service_customers "Rue Salon" 0.05
+
+  pure (parties, users, Vendors{..})
+
+setupNav : Script (LedgerParties, Users, Vendors, Customers)
+setupNav = do
+  (parties@LedgerParties{..}, users@Users{..}, vendors@Vendors{..})
+    <- setup
+
+  aliceAccount <- createCustomerAccountWithOpeningReward 
+    issuer_service customer_alice 500
+
+  bobAccount <- createCustomerAccountWithOpeningReward 
+    issuer_service customer_bob 0
+
+  pure (parties, users, vendors, Customers{..})
+
+--------------------------- Happy Scenarios ----------------------
+
+-- | Customer can choose 'UseMaxPossible' points for doing payment
+runHappyScenario1 : Script ()
+runHappyScenario1 = do
+
+  (LedgerParties{..}, Users{..}, Vendors{..}) <- setup
+
+  let initialPoints = 500
+  aliceCustomerCid <- createCustomerAccountWithOpeningReward
+    issuer_service customer_alice initialPoints
+
+  let purchaseValue = 980
+  salesReqDraft1 <- submitUser garyId do
+    createCmd SalesRequestDraft with
+      salesRequest = SalesRequest with
+        issuer = issuer_service
+        vendor = vendor_gary
+        customer = customer_alice
+        authorizedVendor = gary._2
+        items = NE.singleton "Cake"
+        amount = purchaseValue
+        pointsUsed = None
+
+  salesReqApproved1 <- submitUser aliceId do
+    exerciseCmd salesReqDraft1 ApproveSalesRequest with
+      usePoints = UseMaxPossible
+
+  submitUser issuerId do
+    exerciseCmd salesReqApproved1 SettleApprovedSalesRequest
+
+  [(_, customerAcc : CustomerAccount)] <- query customer_alice
+
+  let expectedRemainingPoints = floor $ intToDecimal (purchaseValue - initialPoints) * garyBakeryPointsFactor
+  assertMsg "Points mismatch" (customerAcc.points == expectedRemainingPoints)
+  pure ()
+
+-- | Customer can specify the amount of points to use for payment via 'UseTheseMany'
+runHappyScenario2 : Script ()
+runHappyScenario2 = do
+
+  (LedgerParties{..}, Users{..}, Vendors{..}) <- setup
+
+  let initialPoints = 500
+  aliceCustomerCid <- createCustomerAccountWithOpeningReward
+    issuer_service customer_alice initialPoints
+
+  let purchaseValue = 980
+  salesReqDraft1 <- submitUser garyId do
+    createCmd SalesRequestDraft with
+      salesRequest = SalesRequest with
+        issuer = issuer_service
+        vendor = vendor_gary
+        customer = customer_alice
+        authorizedVendor = gary._2
+        items = NE.singleton "Cake"
+        amount = purchaseValue
+        pointsUsed = None
+
+  let pointsUsed = 300
+  salesReqApproved1 <- submitUser aliceId do
+    exerciseCmd salesReqDraft1 ApproveSalesRequest with
+      usePoints = UseTheseMany pointsUsed
+
+  submitUser issuerId do
+    exerciseCmd salesReqApproved1 SettleApprovedSalesRequest
+
+
+  [(_, customerAcc : CustomerAccount)] <- query customer_alice
+
+  let expectedRemainingPoints = (initialPoints - pointsUsed) +
+        (floor $ intToDecimal (purchaseValue - pointsUsed) * garyBakeryPointsFactor)
+  assertMsg "Points mismatch" (customerAcc.points == expectedRemainingPoints)
+  pure ()
+
+-- | Customer can specify not to use any points for payment, and should still earn points
+runHappyScenario3 : Script ()
+runHappyScenario3 = do
+
+  (LedgerParties{..}, Users{..}, Vendors{..}) <- setup
+
+  let initialPoints = 500
+  aliceCustomerCid <- createCustomerAccountWithOpeningReward
+    issuer_service customer_alice initialPoints
+
+  let purchaseValue = 980
+  salesReqDraft1 <- submitUser garyId do
+    createCmd SalesRequestDraft with
+      salesRequest = SalesRequest with
+        issuer = issuer_service
+        vendor = vendor_gary
+        customer = customer_alice
+        authorizedVendor = gary._2
+        items = NE.singleton "Cake"
+        amount = purchaseValue
+        pointsUsed = None
+
+  salesReqApproved1 <- submitUser aliceId do
+    exerciseCmd salesReqDraft1 ApproveSalesRequest with
+      usePoints = UseNone
+
+  submitUser issuerId do
+    exerciseCmd salesReqApproved1 SettleApprovedSalesRequest
+
+
+  [(_, customerAcc : CustomerAccount)] <- query customer_alice
+
+  let expectedRemainingPoints = initialPoints +
+        (floor $ intToDecimal purchaseValue * garyBakeryPointsFactor)
+  assertMsg "Points mismatch" (customerAcc.points == expectedRemainingPoints)
+  pure ()
+
+-- | Alice tries to spend more points than available in her account
+runUnhappyScenario1 : Script ()
+runUnhappyScenario1 = do
+
+  (LedgerParties{..}, Users{..}, Vendors{..}) <- setup
+
+  aliceCustomerCid <- createCustomerAccountWithOpeningReward
+    issuer_service customer_alice 500
+
+  salesReqDraft1 <- submitUser garyId do
+    createCmd SalesRequestDraft with
+      salesRequest = SalesRequest with
+        issuer = issuer_service
+        vendor = vendor_gary
+        customer = customer_alice
+        authorizedVendor = gary._2
+        items = NE.singleton "Cake"
+        amount = 980
+        pointsUsed = None
+
+  submitMultiMustFail [customer_alice] [issuer_service_customers] do
+    exerciseCmd salesReqDraft1 ApproveSalesRequest with
+      usePoints = UseTheseMany 600
+
+  pure ()
+
+--------------------------- Unhappy Scenarios ----------------------
+
+-- | The approval of SalesRequestDraft must fail if the vendor is not authorized at the time of approval
+runUnhappyScenario2 : Script ()
+runUnhappyScenario2 = do
+
+  (LedgerParties{..}, Users{..}, Vendors{..}) <- setup
+
+  submit issuer_service do
+    exerciseCmd gary._2 DeAuthorizeVendor
+  
+  aliceCustomerCid <- createCustomerAccountWithOpeningReward
+    issuer_service customer_alice 500
+
+  salesReqDraft1 <- submitUser garyId do
+    createCmd SalesRequestDraft with
+      salesRequest = SalesRequest with
+        issuer = issuer_service
+        vendor = vendor_gary
+        customer = customer_alice
+        authorizedVendor = gary._2
+        items = NE.singleton "Cake"
+        amount = 980
+        pointsUsed = None
+
+  submitMultiMustFail [customer_alice] [issuer_service_customers] do
+    exerciseCmd salesReqDraft1 ApproveSalesRequest with
+      usePoints = UseNone
+
+  pure ()
+
+-- | The approval of SalesRequestDraft must fail if the vendor does not match the authorizedVendor
+runUnhappyScenario3 : Script ()
+runUnhappyScenario3 = do
+
+  (LedgerParties{..}, Users{..}, Vendors{..}) <- setup
+
+  aliceCustomerCid <- createCustomerAccountWithOpeningReward
+    issuer_service customer_alice 500
+
+  salesReqDraft1 <- submitUser garyId do
+    createCmd SalesRequestDraft with
+      salesRequest = SalesRequest with
+        issuer = issuer_service
+        vendor = vendor_gary
+        customer = customer_alice
+        authorizedVendor = rue._2 -- Mismatch of vendor and authorizedVendor
+        items = NE.singleton "Cake"
+        amount = 980
+        pointsUsed = None
+
+  submitMultiMustFail [customer_alice] [issuer_service_customers] do
+    exerciseCmd salesReqDraft1 ApproveSalesRequest with
+      usePoints = UseNone
+
+  pure ()
+
+-- | The approval of SalesRequestDraft must fail if any party other than the customer tries to approve
+runUnhappyScenario4 : Script ()
+runUnhappyScenario4 = do
+
+  (LedgerParties{..}, Users{..}, Vendors{..}) <- setup
+
+  aliceCustomerCid <- createCustomerAccountWithOpeningReward
+    issuer_service customer_alice 500
+
+  salesReqDraft1 <- submitUser garyId do
+    createCmd SalesRequestDraft with
+      salesRequest = SalesRequest with
+        issuer = issuer_service
+        vendor = vendor_gary
+        customer = customer_alice
+        authorizedVendor = gary._2
+        items = NE.singleton "Cake"
+        amount = 980
+        pointsUsed = None
+
+  let otherParties = [customer_bob, issuer_service, issuer_service_customers, vendor_gary, vendor_rue]
+  forA_ otherParties $ \party ->
+    submitMultiMustFail [party] [issuer_service_customers] do
+      exerciseCmd salesReqDraft1 ApproveSalesRequest with
+        usePoints = UseNone
+
+  submitMulti [customer_alice] [issuer_service_customers] do
+    exerciseCmd salesReqDraft1 ApproveSalesRequest with
+      usePoints = UseNone
+
+  pure ()

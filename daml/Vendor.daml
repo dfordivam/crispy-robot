@@ -1,0 +1,26 @@
+module Vendor where
+
+-- | This keeps a record of a vendor's accumulated points via sales to customers
+-- the 'pointsFactor' determines the amount of points customers earn when doing purchase at this vendor
+-- The 'points earned' are calculated by multiplying the 'pointsFactor' to the
+-- cash payment done by the customer, ie the transaction amount - points used
+template VendorAccount
+  with
+    issuer: Party
+    vendor: Party
+    vendorName: Text
+    pointsTransfered: Int
+    pointsFactor: Decimal
+  where
+    signatory issuer
+    observer vendor
+    key (issuer, vendor): (Party, Party)
+    maintainer key._1
+
+    choice TransferPoints : ContractId VendorAccount
+      with
+        points: Int
+      controller issuer
+      do create this with
+           pointsTransfered = this.pointsTransfered + points
+

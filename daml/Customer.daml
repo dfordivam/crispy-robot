@@ -1,0 +1,39 @@
+module Customer where
+
+-- | This keeps track of points available to a customer
+template CustomerAccount
+  with
+    issuer: Party
+    customer: Party
+    points: Int
+  where
+    signatory issuer
+    observer customer
+
+    key (issuer, customer): (Party, Party)
+    maintainer key._1
+
+    ensure (points >= 0)
+
+    choice AddPoints : ContractId CustomerAccount
+      with
+        points: Int
+      controller issuer
+      do
+      assertMsg "Points must be non-zero positive value" (points > 0)
+      create this with
+        issuer
+        customer
+        points = this.points + points
+
+    choice UsePoints : ContractId CustomerAccount
+      with
+        points: Int
+      controller issuer
+      do
+      assertMsg "Points must be non-zero positive value" (points > 0)
+      assertMsg "Not enough points to spend" (points <= this.points)
+      create this with
+        issuer
+        customer
+        points = this.points - points

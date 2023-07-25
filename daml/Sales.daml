@@ -1,0 +1,152 @@
+module Sales where
+
+import DA.NonEmpty
+import DA.Optional
+
+import Vendor
+import Customer
+
+-- | This captures the choice of how many points to use, as exercised by the
+-- customer when doing a purchase at an authorized vendor
+data UseRewardPoints =
+  UseMaxPossible
+  | UseTheseMany with amount: Int
+  | UseNone
+  deriving (Eq, Show)
+  
+-- | This is the 'initiate' step of the 'initiate and accept' pattern.
+-- The customer will have the choice to approve, which will give vendor the
+-- authority to charge the customer for the points used.
+template SalesRequestDraft
+  with
+    salesRequest: SalesRequest
+  where
+    signatory salesRequest.vendor
+    observer salesRequest.customer
+
+    ensure (salesRequest.amount > 0)
+
+    choice ApproveSalesRequest : ContractId SalesRequest
+      with
+        usePoints: UseRewardPoints
+      controller salesRequest.customer
+      do
+      -- Do basic sanity checks, since the vendor will complete the transaction
+      -- with the customer, by doing the remaining payment in cash or other means of payment
+
+      -- Verifies that vendor is authorized at the time of approval
+      -- and the vendor matches
+      av <- fetch @AuthorizedVendor salesRequest.authorizedVendor
+
+      assertMsg "Mismatch in vendor and AuthorizedVendor" (av.vendor == salesRequest.vendor)
+
+      (_, cAcc) <- fetchByKey @CustomerAccount (av.issuer, salesRequest.customer)
+      pointsUsed <- case usePoints of
+        UseMaxPossible -> do
+          pure $ Some (min cAcc.points salesRequest.amount)
+        UseTheseMany p -> do
+          assertMsg "Not enough points available" (p < cAcc.points)
+          pure $ Some p
+        UseNone -> pure None
+      create salesRequest with
+        pointsUsed
+
+    choice RejectSalesRequest : ()
+      controller salesRequest.customer
+      do return ()
+
+-- | This is an request approved by both vendor and the customer.
+-- The issuer is required to do the settlement of this, as the accounts of both
+-- parties need to be modified.
+template SalesRequest
+  with
+    issuer: Party
+    vendor: Party
+    customer: Party
+    authorizedVendor: ContractId AuthorizedVendor
+    items: NonEmpty Text
+    amount: Int
+    pointsUsed: Optional Int
+  where
+    signatory customer, vendor
+    observer issuer
+
+    choice SettleApprovedSalesRequest : ContractId SalesRequestSettled
+      controller issuer
+      do
+      -- The validity of AuthorizedVendor is not checked, as the issuer should
+      -- be able to settle the pending SalesRequests even after de-authorizing
+      -- the vendor
+
+      (cId, cAcc) <- fetchByKey @CustomerAccount (issuer, customer)
+      (vId, vAcc) <- fetchByKey @VendorAccount (issuer, vendor)
+
+      (cId, vId) <- case pointsUsed of
+        Some p -> do
+          (,) <$> exercise cId UsePoints with points = p
+            <*> exercise vId TransferPoints with points = p
+        None -> return (cId, vId)
+
+      let pointsEarned = floor $ intToDecimal (amount - (fromOptional 0 pointsUsed)) * vAcc.pointsFactor
+      exercise cId AddPoints with points = pointsEarned
+
+      create SalesRequestSettled with
+        issuer
+        vendor
+        customer
+        items
+        amount
+        pointsUsed
+        pointsEarned
+
+-- | This is a record of settled sales transactions.
+template SalesRequestSettled
+  with
+    issuer: Party
+    vendor: Party
+    customer: Party
+    items: NonEmpty Text
+    amount: Int
+    pointsUsed: Optional Int
+    pointsEarned: Int
+  where
+    signatory issuer
+    observer vendor, customer
+
+-- | This is a certification of an authorized vendor to the customers of the rewards service
+-- All the customers must have the CanReadAs access as the 'customers' party, as
+-- they must be able to read the vendor's name and the 'pointsFactor'
+template AuthorizedVendor
+  with
+    issuer: Party
+    vendor: Party
+    customers: Party
+    vendorName: Text
+    pointsFactor: Decimal
+  where
+    signatory issuer
+    observer vendor, customers
+    key (issuer, vendor): (Party, Party)
+    maintainer key._1
+
+    choice DeAuthorizeVendor :  ()
+      controller issuer
+      do pure ()
+
+    -- This provides a way to create SalesRequestDraft via navigator
+    nonconsuming choice CreateSalesRequestDraft : ContractId SalesRequestDraft
+      with
+        authorizedVendor: ContractId AuthorizedVendor
+        customer: Party
+        items: NonEmpty Text
+        amount: Int
+      controller vendor
+      do create SalesRequestDraft with
+           salesRequest = SalesRequest with
+             issuer
+             vendor
+             customer
+             authorizedVendor
+             items
+             amount
+             pointsUsed = None

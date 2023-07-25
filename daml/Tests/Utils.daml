@@ -1,0 +1,112 @@
+module Tests.Utils where
+
+import Daml.Script
+
+  
+import Customer
+import Sales
+import Vendor
+
+data LedgerParties = LedgerParties with
+    customer_alice : Party
+    customer_bob : Party
+    issuer_service : Party
+    issuer_service_customers: Party
+    vendor_gary : Party
+    vendor_rue : Party
+  deriving (Show, Eq, Ord)
+
+data Users = Users with
+    aliceId : UserId
+    bobId : UserId
+    garyId : UserId
+    rueId : UserId
+    issuerId : UserId
+  deriving (Show, Eq, Ord)
+
+data Vendors = Vendors with
+    gary : (ContractId VendorAccount, ContractId AuthorizedVendor)
+    rue : (ContractId VendorAccount, ContractId AuthorizedVendor)
+  deriving (Show, Eq, Ord)
+
+data Customers = Customers with
+    aliceAccount : ContractId CustomerAccount
+    bobAccount : ContractId CustomerAccount
+  deriving (Show, Eq, Ord)
+
+-- | Create our test parties
+createParties : Script LedgerParties
+createParties = do
+  customer_alice <- allocatePartyWithHint "Customer_Alice" (PartyIdHint "Alice")
+  customer_bob <- allocatePartyWithHint "Customer_Bob" (PartyIdHint "Bob")
+  issuer_service <- allocatePartyWithHint "Issuer_Service" (PartyIdHint "Issuer")
+  issuer_service_customers <- allocateParty "Issuer_Service_Customers"
+  vendor_gary <- allocatePartyWithHint "Vendor_Gary" (PartyIdHint "Gary")
+  vendor_rue <- allocatePartyWithHint "Vendor_Rue" (PartyIdHint "Rue")
+  let ledgerParties = LedgerParties { .. }
+  pure ledgerParties
+
+-- | Create users with appropriate UserRights
+createUsers : LedgerParties -> Script Users
+createUsers LedgerParties{..} = do
+  aliceId <- validateUserId "Alice_Customer"
+  bobId <- validateUserId "Bob_Customer"
+  garyId <- validateUserId "Gary_Vendor"
+  rueId <- validateUserId "Rue_Vendor"
+  issuerId <- validateUserId "Rewards_Issuer_Service"
+
+  createUser (User aliceId (Some customer_alice)) [CanActAs customer_alice, CanReadAs issuer_service_customers]
+  createUser (User bobId (Some customer_bob)) [CanActAs customer_bob, CanReadAs issuer_service_customers]
+
+  createUser (User garyId (Some vendor_gary)) [CanActAs vendor_gary]
+  createUser (User rueId (Some vendor_rue)) [CanActAs vendor_rue]
+
+  createUser (User issuerId (Some issuer_service)) [CanActAs issuer_service]
+  pure $ Users {..}
+
+createVendorAccountAndAuthorize
+  : Party
+  -> Party
+  -> Party
+  -> Text
+  -> Decimal
+  -> Script (ContractId VendorAccount, ContractId AuthorizedVendor)
+createVendorAccountAndAuthorize issuer vendor customers vendorName pointsFactor = do
+  vendorAccountCid <- submit issuer do
+    createCmd VendorAccount with
+      issuer
+      vendor
+      vendorName
+      pointsTransfered = 0
+      pointsFactor
+  
+  authorizedVendorCid <- submit issuer do
+    createCmd AuthorizedVendor with
+      issuer
+      vendor
+      customers
+      vendorName
+      pointsFactor
+  pure (vendorAccountCid, authorizedVendorCid)
+  
+createCustomerAccountWithOpeningReward
+  : Party
+  -> Party
+  -> Int
+  -> Script (ContractId CustomerAccount)
+createCustomerAccountWithOpeningReward issuer customer rewardPoints = do
+
+  customerAccountCid <- submit issuer do
+    createCmd CustomerAccount with
+      issuer
+      customer
+      points = 0
+
+  if rewardPoints > 0
+     then submit issuer do
+            exerciseCmd customerAccountCid AddPoints with points = rewardPoints
+     else pure customerAccountCid
+
+garyBakeryPointsFactor : Decimal
+garyBakeryPointsFactor = 0.02
+
