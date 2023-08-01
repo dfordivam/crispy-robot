@@ -60,6 +60,6 @@ Use `daml start` to open the navigator.
 
 This would run the `runHappyScenario1` to setup the accounts and run the workflow from start to end.
 
-Note: The navigator seems to have a bug, as it does not show the `AuthorizedVendor` contracts to the customer users (`Alice_Customer` and `Bob_Customer`). (The same `setup` script used in the `daml test` works.)
+Note: The navigator ~~seems to have a bug~~ (its a known issue https://github.com/digital-asset/daml/issues/7648), as it does not show the `AuthorizedVendor` contracts to the customer users (`Alice_Customer` and `Bob_Customer`). (The same `setup` script used in the `daml test` works.)
 
 Due to this issue it is not possible for the customers to approve the `SalesRequestDraft` via navigator.
